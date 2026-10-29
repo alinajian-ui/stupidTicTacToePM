@@ -1,0 +1,23 @@
+
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# API keys and secrets
+.env
+.env.*
+!.env.example
+
+# IDE settings
+.vs/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
