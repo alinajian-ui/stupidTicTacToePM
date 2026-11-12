@@ -375,9 +375,8 @@ python -m py_compile game_engine.py main.py human_vs_ai.py play_vs_ai.py model_s
 
 ### 2026-11-05: 新增阻止对方占领中格奖励，改良奖励权重。
 
-- 训练默认保存到 `checkpoint_prevent`，不覆盖
-- `checkpoints_award`。人机窗口改为加载 `checkpoint_prevent/policy_best.pt`。
-
+- 训练默认保存到 `checkpoint_prevent`，不覆盖`checkpoints_award`。人机窗口改为加载 `checkpoint_prevent/policy_best.pt`。
+- 改进了奖励权重，由`+0.02`、`+0.15`、`+0.2` 改为 `+0.1`、`+0.2`、`+0.2`，并可通过命令行参数调整。
 ---
 
 Codex 协作
