@@ -21,3 +21,5 @@ env/
 build/
 dist/
 *.egg-info/
+
+writersREADME.md

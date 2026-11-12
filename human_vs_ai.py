@@ -1,4 +1,4 @@
-"""使用 checkpoints_majority 模型进行本地人机对弈的 PySide6 窗口。"""
+"""使用 checkpoint_prevent 最佳模型（含阻止奖励）进行本地人机对弈的窗口。"""
 
 from __future__ import annotations
 
@@ -63,15 +63,14 @@ class ModelBridge(QObject):
 
     @staticmethod
     def checkpoint_path():
-        """优先使用最佳模型，若不存在则回退到最新模型。"""
+        """【修改】只使用 checkpoint_prevent 中的最佳模型 policy_best.pt。"""
 
-        checkpoint_dir = PROJECT_DIR / "checkpoints_majority"
-        for filename in ("policy_best.pt", "policy_latest.pt"):
-            candidate = checkpoint_dir / filename
-            if candidate.is_file():
-                return candidate
+        candidate = PROJECT_DIR / "checkpoint_prevent" / "policy_best.pt"
+        if candidate.is_file():
+            return candidate
         raise FileNotFoundError(
-            "checkpoints_majority 中没有 policy_best.pt 或 policy_latest.pt。"
+            "checkpoint_prevent 中没有 policy_best.pt；"
+            "请先运行 train_selfplay.py 训练新模型。"
         )
 
     def start(self):
@@ -202,7 +201,7 @@ class HumanVsAIWindow(QMainWindow):
         self.model_error = None
         self.human_turn_starts = []
 
-        self.status_label = QLabel("正在加载 checkpoints_majority 模型……")
+        self.status_label = QLabel("正在加载 checkpoint_prevent 模型……")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(
@@ -364,7 +363,7 @@ class HumanVsAIWindow(QMainWindow):
             "font-size: 17px; font-weight: 600; padding: 8px;"
         )
         if not self.model_ready:
-            self.status_label.setText("正在加载 checkpoints_majority 模型……")
+            self.status_label.setText("正在加载 checkpoint_prevent 模型……")
         elif self.game.winner == self.human_player:
             self.status_label.setText(f"游戏结束：你获胜！ | {score_text}")
         elif self.game.winner == self.ai_player:

@@ -1,12 +1,15 @@
-"""Actor-Critic 自我对弈训练：持续更新 latest，只在评估分数提高时更新 best。
+"""Actor-Critic 自我对弈训练：含局部奖励，持续更新 latest 并筛选 best。
 
 用法：
-  python train_selfplay.py --episodes 500 --resume --device cuda
+  python train_selfplay.py --episodes 500 --device cuda
   python train_selfplay.py --episodes 500 --resume --device cuda --eval-games 40
 
-检查点：
-  checkpoints_ac/policy_latest.pt  每次保存最新训练状态，会被覆盖
-  checkpoints_ac/policy_best.pt    仅在随机对手评估分数提升时更新
+检查点（新模型，默认）：
+  checkpoint_prevent/policy_latest.pt  每次保存最新训练状态，会被覆盖
+  checkpoint_prevent/policy_best.pt    仅在随机对手评估分数提升时更新
+
+旧模型 checkpoints_award 不含阻止奖励，续训时需加：
+  --block-reward 0 --checkpoint-dir checkpoints_award
 """
 from __future__ import annotations
 
@@ -83,7 +86,16 @@ def evaluate_vs_random(model, device, games=40, seed=123):
     return score, results
 
 
-def save_checkpoint(path, model, optimizer, episode, totals, best_score, device):
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    episode,
+    totals,
+    best_score,
+    device,
+    reward_shaping,
+):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save({
         "episode": int(episode),
@@ -93,6 +105,8 @@ def save_checkpoint(path, model, optimizer, episode, totals, best_score, device)
         "best_eval_score": float(best_score),
         "algorithm": "actor_critic_monte_carlo",
         "device": str(device),
+        # 保存奖励配置，方便续训或比较模型时确认训练目标是否一致。
+        "reward_shaping": dict(reward_shaping),
     }, path)
 
 
@@ -101,7 +115,31 @@ def main():
     parser.add_argument("--episodes", type=int, default=500, help="本次新增训练局数")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--checkpoint-dir", default="checkpoints_ac")
+    parser.add_argument(
+        "--center-reward",
+        type=float,
+        default=TicTacToeEnv.DEFAULT_CENTER_CELL_REWARD,
+        help="落在任一中格中心小格时加入 Actor 优势的奖励",
+    )
+    parser.add_argument(
+        "--mini-board-reward",
+        type=float,
+        default=TicTacToeEnv.DEFAULT_MINI_BOARD_REWARD,
+        help="首次赢得一个中格时加入 Actor 优势的奖励",
+    )
+    # 【新增】阻止对方占领中格的奖励，新模型默认 0.2。
+    parser.add_argument(
+        "--block-reward",
+        type=float,
+        default=TicTacToeEnv.DEFAULT_BLOCK_REWARD,
+        help="挡住对手即将赢下的中格时加入 Actor 优势的奖励",
+    )
+    # 【修改】默认目录改为新模型目录 checkpoint_prevent，不覆盖旧模型。
+    parser.add_argument(
+        "--checkpoint-dir",
+        default="checkpoint_prevent",
+        help="检查点目录；含阻止奖励的新模型默认使用 checkpoint_prevent",
+    )
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--eval-every", type=int, default=100,
                         help="每多少局评估一次并决定是否更新 best")
@@ -117,6 +155,14 @@ def main():
         parser.error("episodes/save-every/eval-every/eval-games/log-every 都必须大于 0")
     if args.lr <= 0 or args.temperature <= 0:
         parser.error("lr 和 temperature 必须大于 0")
+    if args.center_reward < 0 or args.mini_board_reward < 0 or args.block_reward < 0:
+        parser.error("center-reward、mini-board-reward 和 block-reward 不能为负数")
+
+    reward_shaping = {
+        "center_cell_reward": float(args.center_reward),
+        "mini_board_reward": float(args.mini_board_reward),
+        "block_reward": float(args.block_reward),  # 【新增】记录到检查点
+    }
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -145,6 +191,12 @@ def main():
         start_episode = int(ckpt.get("episode", 0)) + 1
         totals.update(ckpt.get("totals", {}))
         best_score = float(ckpt.get("best_eval_score", -1.0))
+        previous_rewards = ckpt.get("reward_shaping")
+        if previous_rewards is not None and previous_rewards != reward_shaping:
+            print(
+                "注意：本次奖励配置与检查点不同；"
+                f"检查点={previous_rewards}，本次={reward_shaping}"
+            )
         # 若 latest 来自旧版脚本而没有 best_score，尝试从 best 检查点读取。
         if os.path.isfile(best_path):
             best_ckpt = torch.load(best_path, map_location="cpu", weights_only=True)
@@ -154,9 +206,16 @@ def main():
     started = time.time()
     model.train()
     for episode in range(start_episode, start_episode + args.episodes):
-        env = TicTacToeEnv()
+        env = TicTacToeEnv(
+            center_cell_reward=args.center_reward,
+            mini_board_reward=args.mini_board_reward,
+            block_reward=args.block_reward,  # 【新增】
+        )
         env.reset()
         trajectory = []
+        episode_center_claims = 0
+        episode_mini_board_wins = 0
+        episode_blocks = 0  # 【新增】本局阻止对手占领中格的次数
         for _ in range(81):
             state = env.get_state()
             legal = env.legal_action_mask()
@@ -166,8 +225,14 @@ def main():
             action, log_prob, value = select_action(
                 model, state, legal, device, args.temperature
             )
-            trajectory.append((log_prob, value, player))
-            _, _, done, _ = env.step(action)
+            _, _, done, info = env.step(action)
+            # 奖励只属于刚刚执行该动作的一方。把塑形奖励与该动作一起保存，
+            # 后续只修正 Actor 优势，不扩大 Critic 的 [-1, 1] 终局目标。
+            shaping_reward = float(info["shaping_reward"])
+            trajectory.append((log_prob, value, player, shaping_reward))
+            episode_center_claims += int(info["claimed_center_cell"])
+            episode_mini_board_wins += int(info["won_mini_board"])
+            episode_blocks += int(info["blocked_mini_board"])  # 【新增】
             if done:
                 break
 
@@ -182,13 +247,20 @@ def main():
         if trajectory:
             log_probs = torch.stack([t[0] for t in trajectory])
             values = torch.stack([t[1] for t in trajectory])
-            targets = torch.tensor([
+            terminal_targets = torch.tensor([
                 0.0 if draw or winner == 0 else (1.0 if player == winner else -1.0)
-                for _, _, player in trajectory
+                for _, _, player, _ in trajectory
             ], dtype=torch.float32, device=device)
-            advantages = targets - values.detach()
+            shaping_rewards = torch.tensor(
+                [reward for _, _, _, reward in trajectory],
+                dtype=torch.float32,
+                device=device,
+            )
+            # 中心格、中格胜利和阻止奖励（新增）直接提高对应动作的优势；Critic 仍只拟合
+            # 最终胜负，避免 value_head 的 Tanh 输出被大于 1 的目标拉扯。
+            advantages = terminal_targets - values.detach() + shaping_rewards
             policy_loss = -(log_probs * advantages).mean()
-            value_loss = nn.functional.smooth_l1_loss(values, targets)
+            value_loss = nn.functional.smooth_l1_loss(values, terminal_targets)
             loss = policy_loss + 0.5 * value_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -199,12 +271,24 @@ def main():
         if completed % args.log_every == 0 or completed == 1:
             print(
                 f"训练局 {episode} | O胜 {totals['o_wins']} | X胜 {totals['x_wins']} "
-                f"| 平 {totals['draws']} | 用时 {time.time()-started:.1f}s"
+                f"| 平 {totals['draws']} | 本局中心奖励 {episode_center_claims} 次 "
+                f"| 中格奖励 {episode_mini_board_wins} 次 "
+                f"| 阻止奖励 {episode_blocks} 次 "  # 【新增】
+                f"| 用时 {time.time()-started:.1f}s"
             )
 
         should_evaluate = completed % args.eval_every == 0 or completed == args.episodes
         if completed % args.save_every == 0 or should_evaluate:
-            save_checkpoint(latest_path, model, optimizer, episode, totals, best_score, device)
+            save_checkpoint(
+                latest_path,
+                model,
+                optimizer,
+                episode,
+                totals,
+                best_score,
+                device,
+                reward_shaping,
+            )
             print(f"最新模型已保存：{latest_path}")
 
         if should_evaluate:
@@ -217,12 +301,30 @@ def main():
             )
             if score > best_score:
                 best_score = score
-                save_checkpoint(best_path, model, optimizer, episode, totals, best_score, device)
+                save_checkpoint(
+                    best_path,
+                    model,
+                    optimizer,
+                    episode,
+                    totals,
+                    best_score,
+                    device,
+                    reward_shaping,
+                )
                 print(f"刷新最佳模型！新分数 {best_score:.3f}，保存至：{best_path}")
             else:
                 print(f"未超过历史最佳分数 {best_score:.3f}，保留原最佳模型。")
             # 将最新检查点里的最佳分数也写入，供下次续训比较。
-            save_checkpoint(latest_path, model, optimizer, episode, totals, best_score, device)
+            save_checkpoint(
+                latest_path,
+                model,
+                optimizer,
+                episode,
+                totals,
+                best_score,
+                device,
+                reward_shaping,
+            )
 
     print("本轮训练结束。latest 是最新模型，best 是随机对手评估分数最高的模型。")
 

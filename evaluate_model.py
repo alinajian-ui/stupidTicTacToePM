@@ -6,8 +6,8 @@ from ai_model import ActorCriticCNN, mask_illegal_actions
 
 
 def main():
-    best_path = os.path.join("checkpoints_ac", "policy_best.pt")
-    latest_path = os.path.join("checkpoints_ac", "policy_latest.pt")
+    best_path = os.path.join("checkpoints_award", "policy_best.pt")
+    latest_path = os.path.join("checkpoints_award", "policy_latest.pt")
     path = best_path if os.path.isfile(best_path) else latest_path
     if not os.path.isfile(path):
         raise FileNotFoundError("找不到模型，请先运行 train_selfplay.py。")

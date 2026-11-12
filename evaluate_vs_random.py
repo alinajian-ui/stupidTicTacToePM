@@ -58,7 +58,11 @@ def play_game(model, model_player, device, greedy):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", default="checkpoints_ac/policy_latest.pt")
+    parser.add_argument(
+        "--checkpoint",
+        default="checkpoints_award/policy_best.pt",
+        help="待评估模型；默认使用奖励塑形版本的最佳模型",
+    )
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--greedy", action="store_true",
                         help="模型总是选择最高分动作；不加此参数则按策略采样")
